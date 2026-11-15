@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232F49C6'/%3E%3Crect x='13' y='6' width='6' height='10' rx='1' fill='%23F5C63C'/%3E%3Crect x='13' y='16' width='6' height='10' rx='1' fill='%23A9B8FF'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#2F49C6">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%232F49C6'/%3E%3Crect x='13' y='6' width='6' height='10' rx='1' fill='%23F5C63C'/%3E%3Crect x='13' y='16' width='6' height='10' rx='1' fill='%23A9B8FF'/%3E%3C/svg%3E">
 <meta name="description" content="Six questions a day. Answer honestly, then guess how everyone else answered.">
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
 <title>Split’em</title>
@@ -1225,7 +1228,6 @@ function prefs() {
   wipe.onclick = async () => { if (!armed) { armed = true; wipe.textContent = 'Tap again to erase'; setTimeout(() => { armed = false; if (wipe.isConnected) wipe.textContent = 'Erase'; }, 4000); return; }
     wipe.disabled = true; wipe.textContent = 'Erasing…';
     try { await rpc('delete_me'); } catch (e) { if (ONLINE) { wipe.disabled = false; wipe.textContent = 'Erase'; toast('Could not reach the database. Nothing was erased. Try again.'); return; } }
-    try { if (SB) await SB.auth.signOut(); } catch (e) {}
     store.clear(); try { localStorage.removeItem('splitem.auth'); } catch (e) {}
     location.hash = ''; location.reload(); };
 }
