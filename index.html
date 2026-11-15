@@ -325,6 +325,10 @@ h3{font-family:var(--display);font-weight:600;font-size:var(--t-l);line-height:1
 .switch::after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:var(--sheet);transition:transform .2s}
 .switch[aria-checked="true"]{background:var(--a)}.switch[aria-checked="true"]::after{transform:translateX(22px)}
 .msg{border-top:1px solid var(--line);padding:12px 0;display:flex;flex-direction:column;gap:2px}
+.est{display:block;margin-top:4px;font-size:var(--t-xs);font-weight:600;color:var(--muted)}
+.prose{display:flex;flex-direction:column;gap:12px;max-width:62ch}
+.prose h3{margin-top:8px}
+.prose ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 .msg small{color:var(--muted);font-size:var(--t-xs)}.msg p{overflow-wrap:anywhere}
 
 /* battle, dialog, toast, confetti */
@@ -382,8 +386,8 @@ h3{font-family:var(--display);font-weight:600;font-size:var(--t-l);line-height:1
   </header>
   <main id="stage"></main>
   <footer class="foot">
-    <span>Preview version. Results and other players are sample data until launch.</span>
-    <nav><button type="button" data-go="battle">Battle</button><button type="button" data-go="archive">Archive</button><button type="button" data-go="board">Leaderboard</button><button type="button" data-go="feedback">Feedback</button><button type="button" data-go="prefs">Settings</button></nav>
+    <span>Results come from real players. Until a question has 30 answers, you see our estimate.</span>
+    <nav><button type="button" data-go="battle">Battle</button><button type="button" data-go="archive">Archive</button><button type="button" data-go="board">Leaderboard</button><button type="button" data-go="feedback">Feedback</button><button type="button" data-go="prefs">Settings</button><button type="button" data-go="privacy">Privacy</button></nav>
   </footer>
 </div>
 
@@ -400,6 +404,7 @@ h3{font-family:var(--display);font-weight:600;font-size:var(--t-l);line-height:1
 
 <div id="overlay"></div>
 
+<script src="vendor/supabase-2.89.0.js"></script>
 <script>
 (() => {
 'use strict';
@@ -565,6 +570,7 @@ function histogram(d, seed) {
   return {bins: out, med, peak: Math.max(...out)};
 }
 SETS.forEach((set, si) => set.forEach((q, qi) => {
+  q.key = 's' + si + 'q' + qi;
   const seed = si * 10 + qi + 1, r = k => noise(k, seed) * 2 - 1;
   q.n = 1500 + Math.floor(noise(9, seed) * 1900);
   const price = q.t === 'price';
@@ -579,6 +585,7 @@ SETS.forEach((set, si) => set.forEach((q, qi) => {
   for (const key in by) by[key] = price ? clamp(by[key], -N, N) : clamp(by[key], 2, 98);
   q.by = by;
 }));
+const KEYQ = {}; SETS.forEach(set => set.forEach(q => { KEYQ[q.key] = q; }));
 const truthOf = q => q.t === 'price' ? q.h.med : q.t === 'group' ? q.by[q.g[0]] : q.p;
 
 /* scoring */
@@ -588,8 +595,6 @@ const tier = s => s >= 80 ? 'hi' : s >= 50 ? 'mid' : 'lo';
 const word = s => s === 100 ? 'Dead on.' : s >= 85 ? 'Sharp.' : s >= 60 ? 'Close.' : s >= 30 ? 'A bit off.' : 'Way off.';
 function erf(x) { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + .3275911 * x);
   return s * (1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - .284496736) * t + .254829592) * t * Math.exp(-x * x)); }
-const MU = 385, SD = 82, PLAYERS = 2318;
-const percentile = s => clamp(Math.round(50 * (1 + erf((s - MU) / (SD * Math.SQRT2)))), 1, 99);
 const rankTitle = p => p >= 90 ? 'Mind reader' : p >= 70 ? 'Sharp reader' : p >= 40 ? 'Decent read' : 'Still tuning in';
 
 /* dates and schedule: day No. 1 is BASE, and every day number maps to one fixed set */
@@ -623,10 +628,10 @@ function load() {
   S.run = sv.run && sv.run.day === DAY ? sv.run : {day:DAY, answers:[], guesses:[], scores:[]};
   S.hist = sv.hist || {}; S.arch = sv.arch || {}; S.outbox = sv.outbox || [];
   if (sv.v !== 3) { for (const k in S.hist) S.hist[k].no = noOfKey(k); S.arch = {}; }
-  S.bt =sv.bt && validRefs(sv.bt.refs) && sv.bt.my ? Object.assign({players:{}}, sv.bt) : null;
+  S.bt = sv.bt && validKeys(sv.bt.qkeys) && sv.bt.my ? {code:sv.bt.code, qkeys:sv.bt.qkeys, my:sv.bt.my, rows:[]} : null;
 }
 const save = () => store.set({v:3, profile:S.profile, user:S.user, prefs:S.prefs, streak:S.streak, run:S.run, hist:S.hist, arch:S.arch, outbox:S.outbox,
-  bt: S.bt ? {code:S.bt.code, refs:S.bt.refs, bots:S.bt.bots, my:S.bt.my, local:S.bt.local} : null});
+  bt: S.bt ? {code:S.bt.code, qkeys:S.bt.qkeys, my:S.bt.my} : null});
 const calm = () => RM || S.prefs.calm;
 const liveStreak = () => (S.streak.last === DAY || S.streak.last === YDAY) ? S.streak.count : 0;
 
@@ -641,30 +646,41 @@ function applySkin() {
 mq.addEventListener && mq.addEventListener('change', applySkin);
 new MutationObserver(applySkin).observe(root, {attributes:true, attributeFilter:['data-theme']});
 
-/* ---------- shared platform store for feedback and question ideas ---------- */
-let DB = null, UID = null, ADMIN = false;
-(async () => {
+/* ---------- backend: Supabase ----------
+   Every player gets an anonymous ID on first visit. Answers, guesses and scores go to the database,
+   where the guess is scored against real answers (or our estimate until a question has 30). */
+const SB_URL = 'https://hcrxmrrwppygbsmcnsyb.supabase.co', SB_KEY = 'sb_publishable_ttCKIa0KpmctPRr25Yx-yQ_IMYGjkGE';
+let SB = null, UID = null, ONLINE = false;
+const timeout = (pr, ms) => Promise.race([pr, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+const ready = (async () => {
   try {
-    if (!window.claude || !window.claude.use) return;
-    const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
-    DB = db;
-    if (user) { try { UID = await user.id(); } catch (e) {} try { ADMIN = !!(await user.canEdit()); } catch (e) {} }
-    drawNav(); watchBattle(); if (S.view === 'battle') render();
-  } catch (e) {}
+    if (!window.supabase) return;
+    SB = window.supabase.createClient(SB_URL, SB_KEY, {auth: {persistSession: true, autoRefreshToken: true, storageKey: 'splitem.auth'}});
+    let {data} = await timeout(SB.auth.getSession(), 10000);
+    let user = data && data.session && data.session.user;
+    if (!user) { const r = await timeout(SB.auth.signInAnonymously(), 10000); if (r.error) throw r.error; user = r.data.user; }
+    UID = user.id; ONLINE = true;
+    syncProfile();
+  } catch (e) { ONLINE = false; }
 })();
+async function syncProfile() {
+  await ready; if (!ONLINE) return;
+  const p = S.profile || {};
+  try { await SB.from('profiles').upsert({id: UID, name: S.user ? S.user.name : null, age: p.age || null, gender: p.gender || null, region: p.region || null, updated_at: new Date().toISOString()}); } catch (e) {}
+}
+async function rpc(fn, args) {
+  await ready; if (!ONLINE) throw new Error('offline');
+  const {data, error} = await timeout(SB.rpc(fn, args || {}), 12000);
+  if (error) throw error;
+  return data;
+}
 async function submit(kind, payload) {
-  const item = Object.assign({kind, at: new Date().toISOString(), name: S.user ? S.user.name : ''}, payload);
-  if (DB && UID) {
-    try {
-      const ref = DB.doc('inbox/' + UID), snap = await ref.get();
-      const items = snap.exists ? ((snap.data().items) || []).slice() : [];
-      items.push(item);
-      await ref.set({items, updatedAt: item.at});
-      return 'sent';
-    } catch (e) {}
+  await ready;
+  if (ONLINE) {
+    try { const {error} = await SB.from('inbox').insert({kind, body: payload.text || null, detail: payload.type || payload.mood || null, name: S.user ? S.user.name : null});
+      if (!error) return 'sent'; } catch (e) {}
   }
-  S.outbox.push(item); save();
-  return 'local';
+  return 'failed';
 }
 
 /* ---------- small helpers ---------- */
@@ -751,7 +767,6 @@ function drawNav() {
   const items = acct
     ? [['home','Home','Start page'], ['play', done ? 'Today’s result' : 'Today’s six', 'No. ' + DAYNO], ['profile','Profile','Stats and streak'], ['archive','Archive','Previous sets']]
     : [['battle','Battle','Play against friends'], ['board','Leaderboard','Today and all time'], ['suggest','Suggest a question','Add to the pool'], ['feedback','Feedback','Tell us what to fix'], ['prefs','Settings','Appearance and data']];
-  if (!acct && ADMIN) items.push(['bank','Question bank','Owner only'], ['inbox','Inbox','Owner only']);
   $('#nav').innerHTML = items.map(([k, l, s]) => `<button type="button" data-nav="${k}" class="${S.view === k ? 'on' : ''}">${l}<small>${s}</small></button>`).join('');
 }
 function openDrawer(kind) {
@@ -772,7 +787,7 @@ function signIn(then) {
   const o = $('#overlay'); const d = document.createElement('div'); d.className = 'dlg';
   d.innerHTML = `<form class="sheet" role="dialog" aria-modal="true" aria-labelledby="dlg-t">
     <h2 id="dlg-t">Sign in</h2>
-    <p class="sub">Pick the name that shows on the leaderboard. Email and Google sign-in arrive with the real launch. In this preview your name stays on this device.</p>
+    <p class="sub">Pick the name that shows on the leaderboard and in battles. Your games are saved in this browser. Sign-in with email comes later.</p>
     <div class="field"><label for="name-in">Display name</label><input id="name-in" maxlength="18" autocomplete="nickname" value="${S.user ? esc(S.user.name) : ''}"></div>
     <button class="btn" type="submit">Continue</button><button class="btn ghost" type="button" data-x>Cancel</button></form>`;
   o.appendChild(d); const inp = $('#name-in', d); inp.focus();
@@ -780,11 +795,11 @@ function signIn(then) {
   d.addEventListener('click', e => { if (e.target === d || e.target.closest('[data-x]')) close(); });
   d.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
   $('form', d).addEventListener('submit', e => { e.preventDefault(); const name = inp.value.trim(); if (!name) { inp.focus(); return; }
-    S.user = {name}; save(); close(); toast('Signed in as ' + name); drawNav(); if (typeof then === 'function') then(); else render(); });
+    S.user = {name}; save(); syncProfile(); close(); toast('Signed in as ' + name); drawNav(); if (typeof then === 'function') then(); else render(); });
 }
 
 /* ---------- navigation ---------- */
-const ROUTES = ['home','play','battle','archive','board','profile','prefs','feedback','inbox','bank'];
+const ROUTES = ['home','play','battle','archive','board','profile','prefs','feedback','privacy'];
 function go(view, opts = {}) {
   S.view = view; S.scrollTo = opts.scroll || null; if (view !== 'play') S.onb = null;
   try { const h = view === 'home' ? '' : view; if (location.hash.slice(1) !== h) { if (h) location.hash = h; else history.replaceState(null, '', location.pathname + location.search); } } catch (e) {}
@@ -799,12 +814,12 @@ document.addEventListener('click', e => {
   else if (t.dataset.scroll) { const el = document.getElementById(t.dataset.scroll); if (el) el.scrollIntoView({behavior: calm() ? 'auto' : 'smooth', block:'start'}); }
   else if (t.dataset.act) { const a = t.dataset.act;
     if (a === 'play') startGame(DAYNO); else if (a === 'signin') { openDrawer(false); signIn(); }
-    else if (a === 'signout') { S.user = null; save(); openDrawer(false); toast('Signed out'); render(); }
+    else if (a === 'signout') { S.user = null; save(); syncProfile(); openDrawer(false); toast('Signed out'); render(); }
     else if (a === 'profile') { openDrawer(false); go('profile'); } }
 });
 function startGame(no) {
   const daily = no === DAYNO;
-  S.game = {no, set: setOf(no), qs: SETS[setOf(no)], daily, run: daily ? S.run : {answers:[], guesses:[], scores:[]}};
+  S.game = {no, set: setOf(no), qs: SETS[setOf(no)], daily, mode: daily ? 'daily' : 'archive', ref: String(no), run: daily ? S.run : {answers:[], guesses:[], scores:[], truths:[]}};
   S.cur = S.game.run.scores.length; S.phase = S.cur >= CARDS ? 'done' : 'answer'; S.tmp = null;
   S.onb = S.profile ? null : {step:0, tmp:{}, then:'play'};
   go('play');
@@ -813,7 +828,7 @@ function render() {
   timers.forEach(clearInterval); timers = [];
   const st = $('#streak'), ls = liveStreak(); st.hidden = !ls; st.textContent = ls + '-day streak';
   if (!ROUTES.includes(S.view)) S.view = 'home';
-  ({home, play, battle, archive, board, profile, prefs, feedback, inbox, bank})[S.view]();
+  ({home, play, battle, archive, board, profile, prefs, feedback, privacy})[S.view]();
   if (S.scrollTo) { const el = document.getElementById(S.scrollTo); S.scrollTo = null; if (el) { el.scrollIntoView({block:'start'}); return; } }
   window.scrollTo(0, 0);
 }
@@ -829,7 +844,7 @@ function home() {
         <h1>Guess how <em>everyone else</em> answered.</h1>
         <p class="lede">Six questions a day. Answer honestly, then guess how the crowd split. The closer your guess, the higher your score.</p>
         <div class="cta"><button class="btn sun" type="button" data-act="play">${done ? 'See today’s result' : started ? 'Continue today’s six' : 'Play today’s six'}</button><button class="btn line" type="button" data-go="battle">Battle friends</button></div>
-        <p class="status">${done ? `You scored <b>${total}</b> today, better than <b>${percentile(total)}%</b> of players. ` : ''}Next six in <b id="clock"></b> · <button class="mini" type="button" data-scroll="how">How it works</button></p>
+        <p class="status">${done ? `You scored <b>${total}</b> today${S.hist[DAY] && S.hist[DAY].p != null ? `, better than <b>${S.hist[DAY].p}%</b> of players` : ''}. ` : ''}Next six in <b id="clock"></b> · <button class="mini" type="button" data-scroll="how">How it works</button></p>
       </div>
       <div class="sheet hero-card" aria-hidden="true">
         <div class="eyebrow"><span>Sample card</span><span>The result</span></div>
@@ -872,7 +887,7 @@ function home() {
   $('#sform').addEventListener('submit', async e => { e.preventDefault(); const ta = $('#s-text'), text = ta.value.trim(); if (text.length < 8) { toast('Write your question first.'); ta.focus(); return; }
     const btn = $('#sform .btn'); btn.disabled = true;
     const res = await submit('question', {text, type: $('#s-kind [aria-pressed="true"]').dataset.v});
-    btn.disabled = false; ta.value = ''; toast(res === 'sent' ? 'Sent. Thank you.' : 'Saved on this device.'); burstAt(btn, 30); });
+    btn.disabled = false; if (res !== 'sent') return toast('Could not send it. Check your connection and try again.'); ta.value = ''; toast('Sent. Thank you.'); burstAt(btn, 30); });
 }
 function clock(el) {
   const tick = () => { if (!el.isConnected || dayCheck()) return;
@@ -901,14 +916,14 @@ function onboard() {
     <div class="chips">${st.opts.map(x => `<button class="chipbtn" type="button" data-v="${x}">${x}</button>`).join('')}<button class="chipbtn quiet" type="button" data-v="">Prefer not to say</button></div>
   </section></div>`;
   $$('.chipbtn', stage).forEach(b => b.onclick = () => { o.tmp[st.key] = b.dataset.v || null;
-    if (++o.step >= STEPS.length) { S.profile = o.tmp; S.onb = null; save(); if (o.then === 'profile') return go('profile'); }
+    if (++o.step >= STEPS.length) { S.profile = o.tmp; S.onb = null; save(); syncProfile(); if (o.then === 'profile') return go('profile'); }
     render(); });
 }
 
 /* ---------- play ---------- */
 function play() {
   if (S.onb) return onboard();
-  if (!S.game) { S.game = {no:DAYNO, set:setOf(DAYNO), qs:SETS[setOf(DAYNO)], daily:true, run:S.run}; S.cur = S.run.scores.length; S.phase = S.cur >= CARDS ? 'done' : 'answer';
+  if (!S.game) { S.game = {no:DAYNO, set:setOf(DAYNO), qs:SETS[setOf(DAYNO)], daily:true, mode:'daily', ref:String(DAYNO), run:S.run}; S.cur = S.run.scores.length; S.phase = S.cur >= CARDS ? 'done' : 'answer';
     if (!S.profile) { S.onb = {step:0, tmp:{}, then:'play'}; return onboard(); } }
   if (S.phase === 'done') return results();
   card();
@@ -922,10 +937,13 @@ function ticks(legend) {
   return `<div class="ticks" aria-hidden="true">${marks.map(([i, t]) => `<span style="left:${(i + N) / (2 * N) * 100}%">${t}</span>`).join('')}</div>
     ${legend || '<div class="ends" aria-hidden="true"><span><i class="chip b"></i>I would pay</span><span>Pay me<i class="chip a"></i></span></div>'}`;
 }
-function breakdown(q) {
-  const mineG = myGroups(), price = q.t === 'price';
+const countLine = st => st.offline ? 'offline estimate' : st.real ? `${st.n.toLocaleString('en-GB')} answers` : `${st.n} ${st.n === 1 ? 'answer' : 'answers'} so far`;
+const estLine = (q, st) => st.offline ? '<span class="est">You are offline, so this card was scored against our estimate and does not count toward the leaderboard.</span>'
+  : st.real ? '' : `<span class="est">Early estimate: real results show once ${q.t === 'group' ? `15 ${GNAME[q.g[0]]}` : '30 people'} have answered.</span>`;
+function breakdown(q, st) {
+  const mineG = myGroups(), price = q.t === 'price', by = st.by || q.by, byn = st.by_n || {};
   const rows = GROUPS.map(([name, list]) => `<h4>${name}</h4>` + list.map(([k, lab]) => {
-    const v = q.by[k], asked = q.g && q.g[0] === k;
+    const v = by[k], asked = q.g && q.g[0] === k;
     return `<span class="lb ${asked ? 'asked' : ''}">${lab}${mineG.includes(k) ? '<em>you</em>' : ''}</span>` +
       (price ? `<span class="tr p"><i style="left:${(v + N) / (2 * N) * 100}%"></i></span><span class="vl">${signed(val(v))}</span>`
              : `<span class="tr"><i style="width:${v}%"></i></span><span class="vl">${v}% ${q.a.length <= 5 ? q.a : ''}</span>`);
@@ -936,6 +954,7 @@ function breakdown(q) {
     ${q.note ? `<div class="think"><b>The thinking</b>${q.note}</div>` : ''}
     <div class="bk">${rows}</div>
     ${price ? '<p class="note">Dots show each group’s median on the same scale as above. Left of centre means they would pay.</p>' : `<p class="note">Bars show the share who chose ${q.a}.</p>`}
+    ${!st.offline && Object.keys(byn).some(k => byn[k] < 15) ? '<p class="note">A group with fewer than 15 answers shows our estimate.</p>' : ''}
   </div></div>`};
 }
 const lockRow = label => `<div class="lockrow"><button class="stepb" type="button" data-step="-1" aria-label="One step down">−</button><button class="btn" type="button" id="lock">${label}</button><button class="stepb" type="button" data-step="1" aria-label="One step up">+</button></div>
@@ -945,7 +964,7 @@ function card() {
   const G = S.game, R = G.run, q = G.qs[S.cur], ph = S.phase, isPrice = q.t === 'price';
   const kind = {split:'Split', price:'Price', group:'Group'}[q.t];
   const phaseName = {answer: isPrice ? 'Your price' : 'Your answer', guess:'Your guess', reveal:'The result'}[ph];
-  const last = S.cur === CARDS - 1, truth = truthOf(q), bd = ph === 'reveal' ? breakdown(q) : null;
+  const st = ph === 'reveal' ? S.tmp.st : null, last = S.cur === CARDS - 1, truth = st ? st.value : truthOf(q), bd = st ? breakdown(q, st) : null;
   let mid = '', act = '';
   if (!isPrice && ph === 'answer') {
     mid = `<div class="opts"><button class="opt a" type="button" data-a="a">${q.a}</button><button class="opt b" type="button" data-a="b">${q.b}</button></div>`;
@@ -958,12 +977,12 @@ function card() {
     act = lockRow('Lock in');
   }
   if (!isPrice && ph === 'reveal') {
-    const g = S.tmp.guess, s = S.tmp.score, side = S.tmp.answer === 'a' ? q.p : 100 - q.p;
-    mid = `<p class="whose">How ${q.t === 'group' ? GNAME[q.g[0]] : 'everyone'} split · ${q.n.toLocaleString('en-GB')} answers</p>
+    const g = S.tmp.guess, s = S.tmp.score, all = st.overall, side = S.tmp.answer === 'a' ? all : 100 - all;
+    mid = `<p class="whose">How ${q.t === 'group' ? GNAME[q.g[0]] : 'everyone'} split · ${countLine(st)}</p>
       ${readout(q, g)}
       <div class="splitter static" style="--f:${g / 100};--g:${g / 100}"><span class="you-tag">You ${g}%</span><span class="you-tick"></span><div class="bar"><div class="sa"></div></div></div>
       ${verdictRow(s, last)}
-      <p class="vtext"><strong>${word(s)}</strong> You guessed ${g}%, the real number is ${truth}%. ${q.t === 'group' ? `Across all players it was ${q.p}%.` : `Your own answer put you with the ${side}%.`} ${bd.link}</p>
+      <p class="vtext"><strong>${word(s)}</strong> You guessed ${g}%, the real number is ${truth}%. ${q.t === 'group' ? `Across all players it was ${all}%.` : `Your own answer put you with the ${side}%.`}${estLine(q, st)} ${bd.link}</p>
       ${bd.panel}`;
   }
   if (isPrice && ph !== 'reveal') {
@@ -974,11 +993,12 @@ function card() {
   }
   if (isPrice && ph === 'reveal') {
     const g = S.tmp.guess, m = truth, s = S.tmp.score, steps = Math.abs(g - m);
-    const bars = q.h.bins.map((w, k) => { const i = k - N; return `<i class="${i < 0 ? 'n' : i === 0 ? 'z' : ''}" style="height:${Math.max(3, w / q.h.peak * 100)}%;animation-delay:${k * 6}ms"></i>`; }).join('');
-    mid = `<p class="whose">What everyone named · ${q.n.toLocaleString('en-GB')} answers</p>
+    const bins = st.bins || q.h.bins, peak = Math.max(...bins) || 1;
+    const bars = bins.map((w, k) => { const i = k - N; return `<i class="${i < 0 ? 'n' : i === 0 ? 'z' : ''}" style="height:${Math.max(3, w / peak * 100)}%;animation-delay:${k * 6}ms"></i>`; }).join('');
+    mid = `<p class="whose">What everyone named · ${countLine(st)}</p>
       <div class="price static" style="--f:${(g + N) / (2 * N)};--m:${(m + N) / (2 * N)}"><div class="hist"><span class="medline"></span>${bars}</div><div class="rail"><div class="zero"></div><div class="knob"></div></div>${ticks(`<div class="legend"><span><i class="ic-line"></i>Median <b>${signed(val(m))}</b></span><span><i class="ic-knob"></i>Your guess <b>${signed(val(g))}</b></span></div>`)}</div>
       ${verdictRow(s, last)}
-      <p class="vtext"><strong>${word(s)}</strong> ${steps === 0 ? 'You hit the median exactly.' : `You were ${steps} ${steps === 1 ? 'step' : 'steps'} from the median.`} Your own price was ${signed(val(S.tmp.answer))}.${val(m) < 0 ? ' A minus means people would pay for it.' : ''} ${bd.link}</p>
+      <p class="vtext"><strong>${word(s)}</strong> ${steps === 0 ? 'You hit the median exactly.' : `You were ${steps} ${steps === 1 ? 'step' : 'steps'} from the median.`} Your own price was ${signed(val(S.tmp.answer))}.${val(m) < 0 ? ' A minus means people would pay for it.' : ''}${estLine(q, st)} ${bd.link}</p>
       ${bd.panel}`;
   }
   const dots = G.qs.map((_, i) => `<span class="dot ${R.scores[i] !== undefined ? tier(R.scores[i]) : i === S.cur ? 'now' : ''}"></span>`).join('');
@@ -1005,55 +1025,59 @@ function card() {
         const t = fmt(val(i)); kEl.textContent = t[0]; vEl.textContent = t[1]; }}); }
   $$('[data-step]', stage).forEach(b => b.onclick = () => read.step(+b.dataset.step));
   const lock = $('#lock');
-  if (lock) lock.onclick = () => { const v = read();
+  if (lock) lock.onclick = async () => { const v = read();
     if (isPrice && ph === 'answer') { S.tmp = {answer: v}; S.phase = 'guess'; return render(); }
-    S.tmp.guess = v; S.tmp.score = isPrice ? scorePrice(v, truth) : scoreSplit(v, truth);
-    R.answers.push(S.tmp.answer); R.guesses.push(v); R.scores.push(S.tmp.score);
-    if (G.daily) save(); if (G.battle) pushBattle(); S.phase = 'reveal'; render(); };
-  const st = $('.splitter.static');
-  if (st) { const g = S.tmp.guess;
-    requestAnimationFrame(() => requestAnimationFrame(() => st.style.setProperty('--f', truth / 100)));
+    lock.disabled = true; lock.textContent = 'Checking…'; $$('[data-step]', stage).forEach(b => { b.disabled = true; });
+    const card = S.cur, ans = isPrice ? S.tmp.answer : (S.tmp.answer === 'a' ? 0 : 1);
+    let res;
+    try { res = await rpc('play_card', {p_mode: G.mode, p_ref: G.ref, p_card: card, p_qkey: q.key, p_answer: ans, p_guess: v}); }
+    catch (e) { res = {value: truthOf(q), overall: q.t === 'price' ? q.h.med : q.p, real: false, n: 0, by: q.by, bins: null, guess: v, score: null, offline: true}; }
+    if (S.game !== G || S.cur !== card || S.phase !== 'guess') return;
+    const t = res.value, fresh = isPrice ? scorePrice(v, t) : scoreSplit(v, t);
+    if (res.score == null || (G.mode === 'archive' && res.guess !== v)) { res.score = fresh; res.guess = v; }
+    S.tmp.guess = res.guess; S.tmp.score = res.score; S.tmp.st = res;
+    R.answers.push(S.tmp.answer); R.guesses.push(res.guess); R.scores.push(res.score);
+    (R.truths = R.truths || [])[card] = t;
+    if (G.daily) save(); if (G.battle) save();
+    S.phase = 'reveal'; render(); };
+  const sst = $('.splitter.static');
+  if (sst) { const g = S.tmp.guess;
+    requestAnimationFrame(() => requestAnimationFrame(() => sst.style.setProperty('--f', truth / 100)));
     count($('[data-pa]'), g, truth, v => v + '%'); count($('[data-pb]'), 100 - g, 100 - truth, v => v + '%');
-    setTimeout(() => { const a = $('[data-pa]'), b = $('[data-pb]'); if (a && st.isConnected) { a.innerHTML = pct(truth); b.innerHTML = pct(100 - truth); } }, calm() ? 0 : 1250); }
+    setTimeout(() => { const a = $('[data-pa]'), b = $('[data-pb]'); if (a && sst.isConnected) { a.innerHTML = pct(truth); b.innerHTML = pct(100 - truth); } }, calm() ? 0 : 1250); }
   if (ph === 'reveal' && S.tmp.score >= 85) setTimeout(() => burstAt($('.pts b'), 60), 1150);
   const bk = $('#bk-btn');
   if (bk) bk.onclick = () => { const panel = $('#bk'), open = panel.hidden; panel.hidden = !open; bk.setAttribute('aria-expanded', open);
     bk.textContent = open ? 'Hide the breakdown' : bk.dataset.label; if (open) panel.scrollIntoView({behavior: calm() ? 'auto' : 'smooth', block:'nearest'}); };
   const nx = $('#next');
-  if (nx) nx.onclick = () => { S.cur++; S.phase = 'answer'; S.tmp = null; if (S.cur >= CARDS) { finish(); if (G.battle) return go('battle'); } render(); };
+  if (nx) nx.onclick = () => { S.cur++; S.phase = 'answer'; S.tmp = null; if (S.cur >= CARDS) { finish(); if (G.battle) { S.game = null; return go('battle'); } } render(); };
 }
 function finish() {
-  const G = S.game, total = sum(G.run.scores), p = percentile(total);
-  if (G.daily) { S.hist[DAY] = {no:DAYNO, total, p, scores:G.run.scores.slice()};
+  const G = S.game, total = sum(G.run.scores);
+  if (G.daily) { S.hist[DAY] = {no:DAYNO, total, p:null, scores:G.run.scores.slice()};
     if (S.streak.last !== DAY) { const c = S.streak.last === YDAY ? S.streak.count + 1 : 1; S.streak = {count:c, last:DAY, best:Math.max(S.streak.best || 0, c)}; } }
-  else if (!G.battle) S.arch[G.no] = {total, p, scores:G.run.scores.slice(), guesses:G.run.guesses.slice()};
+  else if (!G.battle) S.arch[G.no] = {total, p:null, scores:G.run.scores.slice(), guesses:G.run.guesses.slice(), truths:(G.run.truths || []).slice()};
   save(); S.phase = 'done'; S.fresh = !G.battle;
 }
 
 /* ---------- results ---------- */
 const squares = sc => sc.map(s => ({hi:'🟦', mid:'🟨', lo:'⬜'})[tier(s)]).join('');
 function results() {
-  const G = S.game, set = G.qs, sc = G.run.scores, total = sum(sc), p = percentile(total), best = sc.indexOf(Math.max(...sc));
-  const W = 600, H = 96, pdf = x => Math.exp(-.5 * ((x - MU) / SD) ** 2);
-  let line = '', area = `M0 ${H}`;
-  for (let x = 0; x <= W; x += 6) { const y = (H - 4) - (H - 10) * pdf(x); line += (x ? 'L' : 'M') + x + ' ' + y.toFixed(1); if (x <= total) area += `L${x} ${y.toFixed(1)}`; }
-  area += `L${Math.min(total, W)} ${H}Z`;
-  const rows = set.map((q, i) => { const g = G.run.guesses[i], t = truthOf(q);
+  const G = S.game, set = G.qs, sc = G.run.scores, total = sum(sc), best = sc.indexOf(Math.max(...sc));
+  const truths = G.run.truths || [];
+  const rows = set.map((q, i) => { const g = G.run.guesses[i], t = truths[i] != null ? truths[i] : truthOf(q);
     const d = g == null ? 'Played on another device' : q.t === 'price' ? `You ${signed(val(g))} · Median ${signed(val(t))}` : `You ${g}% · Real ${t}%${q.t === 'group' ? ` (${GNAME[q.g[0]]})` : ''}`;
     return `<li><span class="sq ${tier(sc[i])}"></span><span class="t"><b>${q.label}</b><span>${d}</span></span><span class="p">${sc[i]}</span></li>`; }).join('');
-  const text = `${G.battle ? 'Split’em battle ' + G.battle : 'Split’em No. ' + G.no}\n${total}/${MAX} · better than ${p}% of players\n${squares(sc)}`;
+  let text = `${G.battle ? 'Split’em battle ' + G.battle : 'Split’em No. ' + G.no}\n${total}/${MAX}\n${squares(sc)}\nsplitem-blush.vercel.app`;
   const stale = G.daily && dkey(new Date()) !== DAY;
   stage.innerHTML = `<div class="page narrow">
     <section class="sheet">
       <div class="eyebrow"><span>${G.battle ? 'Battle ' + G.battle : (G.daily ? '' : 'Archive · ') + 'No. ' + G.no + ' · ' + fmtDate(dateOf(G.no))}</span><span>Your result</span></div>
       <div class="score"><b id="total">${total}</b><span>/ ${MAX}</span></div>
-      <span class="title-tag">${rankTitle(p)}</span>
-      <p class="rank">You read the crowd better than <em>${p}% of players</em>${G.daily ? ' today' : ''}.</p>
+      <span class="title-tag" id="rtitle" hidden></span>
+      <p class="rank" id="rline">${G.daily ? 'Checking where you rank…' : G.battle ? 'Battle round. See how your friends did on the battle page.' : 'Practice round. Archive games do not change your streak or the leaderboard.'}</p>
       <div class="sqs" aria-hidden="true">${sc.map((s, i) => `<i class="${tier(s)}" style="animation-delay:${.9 + i * .09}s"></i>`).join('')}</div>
-      <div><div class="curve" style="--x:${Math.min(1, total / MAX)}"><div class="clip"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
-        <path d="${area}" fill="var(--a-soft)"/><path d="${line}" fill="none" stroke="var(--a)" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
-        <line x1="0" y1="${H - 1}" x2="${W}" y2="${H - 1}" stroke="var(--line)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg></div><span class="me"></span></div>
-        <div class="axis"><span>0</span><span>All scores</span><span>${MAX}</span></div></div>
+      <div id="rcurve" hidden></div>
       <div class="facts">
         <div class="tile"><span>Streak</span><b>${liveStreak()} ${liveStreak() === 1 ? 'day' : 'days'}</b></div>
         <div class="tile"><span>Best card</span><b>${sc[best]}</b></div>
@@ -1074,8 +1098,45 @@ function results() {
   count($('#total'), 0, total, v => v, 900);
   const nd = $('#newday'); if (nd) nd.onclick = newDay;
   if ($('#clock')) clock($('#clock'));
-  $('#copy').onclick = e => copyText(text, e.currentTarget, $('#sharetext'));
-  if (S.fresh) { S.fresh = false; if (p >= 50) setTimeout(() => { burst(innerWidth * .3, innerHeight * .35, 70); burst(innerWidth * .7, innerHeight * .35, 70); }, 700); }
+  const copy = $('#copy'), pre = $('#sharetext');
+  copy.onclick = e => copyText(text, e.currentTarget, pre);
+  const party = S.fresh; S.fresh = false;
+  const cheer = () => { burst(innerWidth * .3, innerHeight * .35, 70); burst(innerWidth * .7, innerHeight * .35, 70); };
+  if (!G.daily) { if (party && total >= 450) setTimeout(cheer, 700); return; }
+  const day = DAY, no = G.no;
+  rpc('leaderboard', {p_day: no}).then(lb => {
+    if (!$('#rline') || S.game !== G) return;
+    const n = lb.players || 0, me = lb.me;
+    if (!me) { $('#rline').textContent = 'Some cards were scored offline, so this game is not on the leaderboard.'; return; }
+    if (n >= 20) {
+      const p = clamp(Math.round(100 * me.below / n), 1, 99);
+      if (S.hist[day]) { S.hist[day].p = p; save(); }
+      $('#rline').innerHTML = `You read the crowd better than <em>${p}% of players</em> today.`;
+      const t = $('#rtitle'); t.textContent = rankTitle(p); t.hidden = false;
+      text = `Split’em No. ${no}
+${total}/${MAX} · better than ${p}% of players
+${squares(sc)}
+splitem-blush.vercel.app`; pre.textContent = text;
+      drawCurve($('#rcurve'), total, lb.mean, Math.max(lb.sd || 0, 30));
+      if (party && p >= 50) setTimeout(cheer, 500);
+    } else {
+      $('#rline').textContent = n === 1 ? 'You are the first player to finish today.' : `You are one of the first ${n} players to finish today. You rank ${me.rank} of ${n}.`;
+      const t = $('#rtitle'); t.textContent = 'Early player'; t.hidden = false;
+      if (party && total >= 400) setTimeout(cheer, 500);
+    }
+  }).catch(() => { if ($('#rline') && S.game === G) $('#rline').textContent = 'Your rank shows once you are back online.'; });
+}
+
+function drawCurve(box, total, mu, sd) {
+  const W = 600, H = 96, pdf = x => Math.exp(-.5 * ((x - mu) / sd) ** 2);
+  let line = '', area = `M0 ${H}`;
+  for (let x = 0; x <= W; x += 6) { const y = (H - 4) - (H - 10) * pdf(x); line += (x ? 'L' : 'M') + x + ' ' + y.toFixed(1); if (x <= total) area += `L${x} ${y.toFixed(1)}`; }
+  area += `L${Math.min(total, W)} ${H}Z`;
+  box.innerHTML = `<div class="curve" style="--x:${Math.min(1, total / MAX)}"><div class="clip"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="${area}" fill="var(--a-soft)"/><path d="${line}" fill="none" stroke="var(--a)" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
+    <line x1="0" y1="${H - 1}" x2="${W}" y2="${H - 1}" stroke="var(--line)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg></div><span class="me"></span></div>
+    <div class="axis"><span>0</span><span>Today’s scores</span><span>${MAX}</span></div>`;
+  box.hidden = false;
 }
 
 /* ---------- archive ---------- */
@@ -1084,7 +1145,7 @@ function archive() {
   for (let no = DAYNO - 1; no >= Math.max(1, DAYNO - 30); no--) {
     const set = SETS[setOf(no)], daily = S.hist[dkey(dateOf(no))], played = daily || S.arch[no];
     html += `<section class="sheet"><div class="set-head"><h3>No. ${no} · ${fmtDate(dateOf(no))}</h3><span class="pillnum">${played ? played.total + ' / ' + MAX + (daily ? '' : ' · practice') : 'Not played'}</span></div>
-      <ol class="qlist">${set.map((q, i) => { const t = truthOf(q);
+      <ol class="qlist">${set.map((q, i) => { const t = played && played.truths && played.truths[i] != null ? played.truths[i] : truthOf(q);
         return `<li><div>${q.text}</div><span>${played ? (q.t === 'price' ? 'Median ' + signed(val(t)) : t + '% ' + q.a + (q.t === 'group' ? ', ' + GNAME[q.g[0]] : '')) + ' · ' + played.scores[i] + ' pts' : {split:'Split', price:'Price', group:'Group'}[q.t]}</span></li>`; }).join('')}</ol>
       <button class="btn ${played ? 'ghost' : ''}" type="button" data-set="${no}">${played ? 'Play again for practice' : 'Play this set'}</button></section>`;
   }
@@ -1094,31 +1155,29 @@ function archive() {
 }
 
 /* ---------- leaderboard ---------- */
-const SAMPLE = [['mara_k',561,512,41],['theo.b',548,498,38],['ines',537,505,29],['finn',522,471,44],['noor',509,489,17],['lukas_w',497,463,36],['okapi',486,477,22],['sam-w',471,452,40],['jule',455,468,12],['ravi',442,431,31]];
 function board() {
   let tab = S.boardTab || 'today';
-  const draw = () => {
-    const me = S.user ? S.user.name : 'You', days = Object.values(S.hist);
-    let rows, mine = null, note;
-    if (tab === 'today') { rows = SAMPLE.map(r => ({n:r[0], s:r[1]})).sort((a, b) => b.s - a.s);
-      if (S.hist[DAY]) mine = {n:me, s:S.hist[DAY].total, me:true, rank:Math.max(1, Math.round((100 - S.hist[DAY].p) / 100 * PLAYERS))};
-      note = mine ? '' : 'Play today’s six to get on the board.'; }
-    else { rows = SAMPLE.map(r => ({n:r[0], s:r[2], g:r[3]})).sort((a, b) => b.s - a.s);
-      if (days.length) { const avg = Math.round(sum(days.map(d => d.total)) / days.length); mine = {n:me, s:avg, g:days.length, me:true, rank:Math.max(1, Math.round((100 - percentile(avg)) / 100 * PLAYERS))}; }
-      note = mine ? '' : 'Finish a daily game to get an average.'; }
-    let list = rows.map((r, i) => Object.assign({rank:i + 1}, r));
-    if (mine) { const pos = list.findIndex(r => mine.s > r.s);
-      if (pos >= 0) { mine.rank = pos + 1; list.splice(pos, 0, mine); list = list.slice(0, 10).map((r, i) => Object.assign(r, {rank:i + 1})); mine = null; } }
-    $('#lb').innerHTML = list.map((r, i) => `<li class="${r.me ? 'me' : ''}" style="animation-delay:${i * 40}ms"><span class="n">${r.rank}</span><span class="nm">${esc(r.n)}${r.g ? `<small>${r.g} games</small>` : ''}</span><span class="s">${r.s}</span></li>`).join('') +
-      (mine ? `<li class="me"><span class="n">${mine.rank}</span><span class="nm">${esc(mine.n)}${mine.g ? `<small>${mine.g} ${mine.g === 1 ? 'game' : 'games'}</small>` : ''}</span><span class="s">${mine.s}</span></li>` : '');
-    $('#lb-note').textContent = note;
-    $('#lb-col').textContent = tab === 'today' ? 'Score today, out of 600' : 'Average score per game';
-  };
   stage.innerHTML = `<div class="page narrow">${phead('Leaderboard', 'Who read the crowd best.')}
     <section class="sheet"><div class="seg" id="lb-tabs"><button type="button" data-v="today" aria-pressed="${tab === 'today'}">Today</button><button type="button" data-v="all" aria-pressed="${tab === 'all'}">All time</button></div>
-      <div class="eyebrow"><span>Top 10 of ${PLAYERS.toLocaleString('en-GB')} sample players</span><span id="lb-col"></span></div>
-      <ol class="board" id="lb"></ol><p class="note" id="lb-note"></p>
-      ${S.user ? '' : '<button class="btn ghost" type="button" data-act="signin">Sign in to pick your name</button>'}</section></div>`;
+      <div class="eyebrow"><span id="lb-n"></span><span id="lb-col"></span></div>
+      <ol class="board" id="lb"></ol><p class="note" id="lb-note">Loading…</p>
+      ${S.user ? '' : '<button class="btn ghost" type="button" data-act="signin">Pick the name you show up with</button>'}</section></div>`;
+  let seq = 0;
+  const draw = async () => {
+    const my = ++seq, list = $('#lb'), note = $('#lb-note');
+    list.innerHTML = ''; note.textContent = 'Loading…';
+    $('#lb-col').textContent = tab === 'today' ? 'Score today, out of 600' : 'Average daily score';
+    let lb;
+    try { lb = tab === 'today' ? await rpc('leaderboard', {p_day: DAYNO}) : await rpc('leaderboard_all'); }
+    catch (e) { if (my === seq && $('#lb')) note.textContent = 'The leaderboard needs a connection. Try again in a moment.'; return; }
+    if (my !== seq || !$('#lb')) return;
+    const n = lb.players || 0, top = lb.top || [], me = lb.me;
+    $('#lb-n').textContent = n ? `Top ${Math.min(10, n)} of ${n} ${n === 1 ? 'player' : 'players'}` : '';
+    const row = (r, i) => `<li class="${r.me ? 'me' : ''}" style="animation-delay:${i * 40}ms"><span class="n">${r.rank}</span><span class="nm">${esc(r.me && S.user ? S.user.name : r.name)}${r.me ? '<small class="tag">you</small>' : ''}${r.games ? `<small>${r.games} ${r.games === 1 ? 'game' : 'games'}</small>` : ''}</span><span class="s">${r.total}</span></li>`;
+    list.innerHTML = top.map(row).join('') + (me && !top.some(r => r.me) ? row(Object.assign({me:true, name:'You'}, me), top.length) : '');
+    note.textContent = n === 0 ? (tab === 'today' ? 'Nobody has finished today’s six yet. Be the first.' : 'Nobody has finished a daily game yet.')
+      : me ? '' : (tab === 'today' ? 'Finish today’s six to get on the board.' : 'Finish a daily game to get an average.');
+  };
   radios($('#lb-tabs'), v => { tab = S.boardTab = v; draw(); });
   draw();
 }
@@ -1137,7 +1196,7 @@ function profile() {
       <div class="stats">
         ${stat('Games played', n)}${stat('Best day', bestDay ? bestDay.total : '–')}${stat('Average score', n ? Math.round(sum(totals) / n) : '–')}
         ${stat('Current streak', liveStreak() + (liveStreak() === 1 ? ' day' : ' days'))}${stat('Longest streak', (S.streak.best || 0) + ((S.streak.best || 0) === 1 ? ' day' : ' days'))}${stat('Best card', bestCard === null ? '–' : bestCard)}
-        ${stat('Average rank', n ? 'Top ' + (100 - Math.round(sum(days.map(d => d.p)) / n)) + '%' : '–')}${stat('Archive sets', Object.keys(S.arch).length)}${stat('Perfect cards', n ? days.flatMap(d => d.scores).filter(s => s === 100).length : '–')}
+        ${(() => { const ps = days.map(d => d.p).filter(x => x != null); return stat('Average rank', ps.length ? 'Top ' + (100 - Math.round(sum(ps) / ps.length)) + '%' : '–'); })()}${stat('Archive sets', Object.keys(S.arch).length)}${stat('Perfect cards', n ? days.flatMap(d => d.scores).filter(s => s === 100).length : '–')}
       </div>
       ${n ? `<div><p class="whose" style="margin-bottom:10px">Your last ${Math.min(7, n)} ${n === 1 ? 'game' : 'games'}</p><div class="histbars">${days.slice(-7).map(d => `<div><span>${d.total}</span><i style="height:${Math.max(4, d.total / MAX * 100)}%"></i><span>No. ${d.no}</span></div>`).join('')}</div></div>`
           : '<p class="sub">Play your first six and your stats start filling in here.</p><button class="btn" type="button" data-act="play">Play today’s six</button>'}
@@ -1146,7 +1205,7 @@ function profile() {
       <div class="stats">${stat('Age', p.age || 'Not given')}${stat('Gender', p.gender || 'Not given')}${stat('Continent', p.region || 'Not given')}</div>
       <p class="note">Used only to group answers, for cards like “how did under-25s split?”.</p>
       <button class="btn ghost" type="button" id="edit">${S.profile ? 'Change these' : 'Answer the three questions'}</button></section></div>`;
-  const out = $('#out'); if (out) out.onclick = () => { S.user = null; save(); toast('Signed out'); render(); };
+  const out = $('#out'); if (out) out.onclick = () => { S.user = null; save(); syncProfile(); toast('Signed out'); render(); };
   $('#edit').onclick = () => { S.onb = {step:0, tmp:{}, then:'profile'}; S.view = 'play'; render(); };
 }
 
@@ -1158,13 +1217,17 @@ function prefs() {
         <div class="seg" id="theme">${['light','dark','auto'].map(t => `<button type="button" data-v="${t}" aria-pressed="${S.prefs.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div></div>
       <div class="rowline"><div><b>Calm mode</b><small>Turns off animations and confetti.</small></div><button class="switch" type="button" id="calm" role="switch" aria-checked="${!!S.prefs.calm}" aria-label="Calm mode"></button></div>
       <div class="rowline"><div><b>Account</b><small>${S.user ? 'Signed in as ' + esc(S.user.name) : 'Not signed in'}</small></div><button class="btn small ghost" type="button" data-go="profile">Open profile</button></div>
-      <div class="rowline"><div><b>Erase this device</b><small>Removes your answers, stats, name and settings from this browser.</small></div><button class="btn small ghost" type="button" id="wipe">Erase</button></div>
+      <div class="rowline"><div><b>Erase my data</b><small>Deletes your answers, scores, name, battles and messages from our database and this browser.</small></div><button class="btn small ghost" type="button" id="wipe">Erase</button></div>
     </section></div>`;
   radios($('#theme'), v => { S.prefs.theme = v; save(); applySkin(); });
   $('#calm').onclick = e => { S.prefs.calm = !S.prefs.calm; e.currentTarget.setAttribute('aria-checked', S.prefs.calm); save(); applySkin(); };
   const wipe = $('#wipe'); let armed = false;
-  wipe.onclick = () => { if (!armed) { armed = true; wipe.textContent = 'Tap again to erase'; setTimeout(() => { armed = false; if (wipe.isConnected) wipe.textContent = 'Erase'; }, 4000); return; }
-    store.clear(); load(); watchBattle(); S.game = null; S.onb = null; applySkin(); toast('Everything on this device was erased.'); go('home'); };
+  wipe.onclick = async () => { if (!armed) { armed = true; wipe.textContent = 'Tap again to erase'; setTimeout(() => { armed = false; if (wipe.isConnected) wipe.textContent = 'Erase'; }, 4000); return; }
+    wipe.disabled = true; wipe.textContent = 'Erasing…';
+    try { await rpc('delete_me'); } catch (e) { if (ONLINE) { wipe.disabled = false; wipe.textContent = 'Erase'; toast('Could not reach the database. Nothing was erased. Try again.'); return; } }
+    try { if (SB) await SB.auth.signOut(); } catch (e) {}
+    store.clear(); try { localStorage.removeItem('splitem.auth'); } catch (e) {}
+    location.hash = ''; location.reload(); };
 }
 
 /* ---------- feedback and inbox ---------- */
@@ -1179,98 +1242,92 @@ function feedback() {
     if (!text && !mood) { toast('Pick a mood or write a line first.'); return; }
     const btn = $('#fform .btn'); btn.disabled = true;
     const res = await submit('feedback', {text, mood: mood ? mood.dataset.v : ''});
-    btn.disabled = false; ta.value = ''; $$('#f-mood button').forEach(b => b.setAttribute('aria-pressed', false));
-    toast(res === 'sent' ? 'Sent. Thank you.' : 'Saved on this device.'); burstAt(btn, 30); });
+    btn.disabled = false; if (res !== 'sent') return toast('Could not send it. Check your connection and try again.');
+    ta.value = ''; $$('#f-mood button').forEach(b => b.setAttribute('aria-pressed', false)); toast('Sent. Thank you.'); burstAt(btn, 30); });
 }
-function inbox() {
-  stage.innerHTML = `<div class="page narrow">${phead('Inbox', 'Question ideas and feedback people have sent. Only you and editors can open this page.')}
-    <section class="sheet"><div id="box"><p class="sub">Loading…</p></div></section></div>`;
-  const box = $('#box');
-  const show = (items, note) => { box.innerHTML = '';
-    if (note) { const p = document.createElement('p'); p.className = 'note'; p.textContent = note; box.appendChild(p); }
-    if (!items.length) { const p = document.createElement('p'); p.className = 'sub'; p.textContent = 'Nothing yet. Suggestions and feedback will show up here.'; box.appendChild(p); return; }
-    items.sort((a, b) => String(b.at).localeCompare(String(a.at))).forEach(it => { const d = document.createElement('div'); d.className = 'msg';
-      const s = document.createElement('small'); s.textContent = [it.kind === 'question' ? 'Question idea' : 'Feedback', it.type || it.mood, it.name, String(it.at || '').slice(0, 10)].filter(Boolean).join(' · ');
-      const p = document.createElement('p'); p.textContent = it.text || '(no text)'; d.append(s, p); box.appendChild(d); }); };
-  if (!DB) return show(S.outbox.slice(), 'The shared inbox is not reachable in this view. Showing what was saved on this device.');
-  const timer = setTimeout(() => show(S.outbox.slice(), 'The inbox could not be reached yet. Showing what was saved on this device.'), 10000);
-  DB.collection('inbox').get().then(snap => { clearTimeout(timer); const all = []; snap.docs.forEach(d => ((d.data() || {}).items || []).forEach(it => all.push(it))); show(all.concat(S.outbox)); },
-    () => { clearTimeout(timer); show(S.outbox.slice(), 'The inbox could not be loaded.'); });
+function privacy() {
+  stage.innerHTML = `<div class="page narrow">${phead('Privacy')}
+    <section class="sheet prose">
+      <p>Split’em is a game. We keep as little about you as we can, and nothing is sold or shared for advertising.</p>
+      <h3>What we store</h3>
+      <ul>
+        <li>A random player ID, created when you first open the site. It is not linked to your email, phone or real name.</li>
+        <li>Your answers, guesses and scores, so we can show how everyone answered and run the leaderboard.</li>
+        <li>Your age range, gender and continent, only if you choose to give them. They are used to group answers, for cards like “how did under-25s split?”, and are never shown next to your name.</li>
+        <li>The display name you pick, which appears on the leaderboard and in battles.</li>
+        <li>Question ideas and feedback you send us.</li>
+      </ul>
+      <h3>Where it is kept</h3>
+      <p>The database runs on Supabase and the website on Vercel. Your settings, streak and game progress are also saved in your own browser.</p>
+      <h3>How long</h3>
+      <p>Until you delete it. Settings → Erase my data removes everything we hold about you at once, from the database and your browser.</p>
+      <h3>Your rights</h3>
+      <p>Under the GDPR you can see, correct or delete your data. Erase my data deletes it straight away. For anything else, write to us through the feedback page.</p>
+      <h3>Cookies</h3>
+      <p>We use no tracking cookies. The site stores your player ID and settings in your browser so your game carries on next time.</p>
+    </section></div>`;
 }
 
 /* ---------- battle ---------- */
 const CODE_CH = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const newCode = () => Array.from({length:4}, () => CODE_CH[Math.floor(Math.random() * CODE_CH.length)]).join('');
-const validRefs = r => Array.isArray(r) && r.length === CARDS && r.every(x => Array.isArray(x) && SETS[x[0]] && SETS[x[0]][x[1]]);
-const cleanScores = a => Array.isArray(a) ? a.slice(0, CARDS).map(n => clamp(Math.round(+n) || 0, 0, 100)) : [];
-const cleanBots = a => Array.isArray(a) ? a.slice(0, 4).map(b => ({name: String((b && b.name) || 'Player').slice(0, 18), scores: cleanScores(b && b.scores)})) : [];
-function pickRefs() {
+const validKeys = k => Array.isArray(k) && k.length === CARDS && k.every(x => KEYQ[x]);
+function pickKeys() {
   const pool = {split:[], price:[], group:[]};
-  SETS.forEach((set, si) => { if (si >= DAILY) set.forEach((q, qi) => pool[q.t].push([si, qi])); });
+  SETS.forEach((set, si) => { if (si >= DAILY) set.forEach(q => pool[q.t].push(q.key)); });
   const take = a => a.splice(Math.floor(Math.random() * a.length), 1)[0];
   return ['split','price','group','split','price','group'].map(t => take(pool[t]));
 }
-function makeBots(code) {
-  const seed = [...code].reduce((a, c) => a + c.charCodeAt(0), 0);
-  return [0, 1, 2].map(i => ({name: SAMPLE[(seed + i * 3) % SAMPLE.length][0],
-    scores: Array.from({length:CARDS}, (_, k) => { const r = noise(k + i * 7, seed); return r < .08 ? 0 : Math.round(35 + r * 65); })}));
-}
-let btUnsub = [];
-function watchBattle() {
-  btUnsub.forEach(u => { try { u(); } catch (e) {} }); btUnsub = [];
-  const b = S.bt; if (!b || b.local || !DB) return;
-  btUnsub.push(DB.doc('battles/' + b.code).onSnapshot(s => { if (s.exists && S.bt === b) { const d = s.data() || {}; if (Array.isArray(d.bots) && d.bots.length) { b.bots = cleanBots(d.bots); save(); drawStandings(); } } }, () => {}));
-  btUnsub.push(DB.collection('battles/' + b.code + '/players').onSnapshot(s => { if (S.bt !== b) return; const p = {};
-    s.docs.forEach(d => { const v = d.data() || {}; p[d.id] = {name: String(v.name || 'Player').slice(0, 18), scores: cleanScores(v.scores)}; }); b.players = p; drawStandings(); }, () => {}));
-}
-function pushBattle() {
-  const b = S.bt; if (!b) return; save();
-  if (b.local || !DB || !UID) return;
-  const data = {name: S.user ? S.user.name : 'Player', scores: b.my.scores.slice(), at: new Date().toISOString()};
-  b.w = (b.w || Promise.resolve()).then(() => DB.doc('battles/' + b.code + '/players/' + UID).set(data)).catch(() => {});
-}
 async function createBattle() {
   if (!S.user) return signIn(createBattle);
-  const code = newCode(), refs = pickRefs(); let local = !(DB && UID);
-  if (!local) { try { await DB.doc('battles/' + code).set({refs: refs.flat(), host: UID, at: new Date().toISOString(), bots: []});
-    await DB.doc('battles/' + code + '/players/' + UID).set({name: S.user.name, scores: [], at: new Date().toISOString()}); } catch (e) { local = true; } }
-  S.bt = {code, refs, bots: local ? makeBots(code) : [], my: {answers:[], guesses:[], scores:[]}, local, players:{}};
-  save(); watchBattle(); go('battle');
+  const btn = $('#bt-new'); if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  const qkeys = pickKeys();
+  for (let i = 0; i < 4; i++) {
+    const code = newCode();
+    try { await rpc('create_battle', {p_code: code, p_qkeys: qkeys});
+      S.bt = {code, qkeys, my: {answers:[], guesses:[], scores:[], truths:[]}, rows:[]}; save(); return go('battle'); }
+    catch (e) { if (!ONLINE || String(e.message || '').includes('timeout')) break; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Start a battle'; }
+  toast('Battles need a connection. Try again in a moment.');
 }
 async function joinBattle(raw) {
   const code = String(raw).toUpperCase().replace(/[^A-Z]/g, '');
   if (code.length !== 4) return toast('Battle codes have four letters.');
   if (!S.user) return signIn(() => joinBattle(code));
-  if (!(DB && UID)) return toast('Joining a friend’s battle needs the live version. Start one here to play sample players.');
-  try {
-    const s = await DB.doc('battles/' + code).get(); if (!s.exists) return toast('No battle with the code ' + code + '.');
-    const d = s.data() || {}, flat = Array.isArray(d.refs) ? d.refs : [], refs = [];
-    for (let i = 0; i + 1 < flat.length; i += 2) refs.push([flat[i], flat[i + 1]]);
-    if (!validRefs(refs)) return toast('That battle could not be opened.');
-    const ref = DB.doc('battles/' + code + '/players/' + UID), ms = await ref.get();
-    const my = {answers:[], guesses:[], scores:[]};
-    if (ms.exists) { my.scores = cleanScores(ms.data().scores); my.guesses = my.scores.map(() => null); my.answers = my.scores.map(() => null); }
-    else await ref.set({name: S.user.name, scores: [], at: new Date().toISOString()});
-    S.bt = {code, refs, bots: cleanBots(d.bots), my, local:false, players:{}};
-    save(); watchBattle(); go('battle');
-  } catch (e) { toast('The battle could not be reached. Try again.'); }
+  let qkeys;
+  try { qkeys = await rpc('join_battle', {p_code: code}); } catch (e) { return toast('Battles need a connection. Try again in a moment.'); }
+  if (!qkeys) return toast('No battle with the code ' + code + '.');
+  if (!validKeys(qkeys)) return toast('That battle could not be opened. Try updating the page.');
+  S.bt = {code, qkeys, my: S.bt && S.bt.code === code ? S.bt.my : {answers:[], guesses:[], scores:[], truths:[]}, rows:[]};
+  save(); go('battle');
 }
-function standings() {
-  const b = S.bt, mineDone = b.my.scores.length, rows = [{name: S.user ? S.user.name : 'You', scores: b.my.scores, me:true}];
-  Object.entries(b.players || {}).forEach(([id, p]) => { if (id !== UID) rows.push({name: p.name, scores: p.scores}); });
-  b.bots.forEach(x => rows.push({name: x.name, scores: x.scores.slice(0, mineDone), bot:true}));
-  rows.forEach(r => { r.total = sum(r.scores); });
-  return rows.sort((x, y) => y.total - x.total);
+async function refreshBattle() {
+  const b = S.bt; if (!b) return;
+  try {
+    const rows = await rpc('battle_standings', {p_code: b.code});
+    if (S.bt !== b) return;
+    b.rows = Array.isArray(rows) ? rows : [];
+    const me = b.rows.find(r => r.me);
+    if (me && me.scores.length > b.my.scores.length) {
+      b.my.scores = me.scores.slice(); b.my.guesses = me.scores.map((_, i) => b.my.guesses[i] ?? null); b.my.answers = me.scores.map((_, i) => b.my.answers[i] ?? null); save();
+    }
+    b.err = false;
+  } catch (e) { b.err = true; }
+  drawStandings();
 }
 function drawStandings() {
-  const list = $('#bt-list'); if (!list || S.view !== 'battle' || !S.bt) return;
-  const rows = standings(), fin = rows.filter(r => r.scores.length >= CARDS).length, all = rows.length > 1 && fin === rows.length;
-  list.innerHTML = rows.map((r, i) => `<li class="${r.me ? 'me' : ''}"><span class="n">${i + 1}</span><span class="nm">${esc(r.name)}${r.me ? '<small class="tag">you</small>' : r.bot ? '<small>sample player</small>' : ''}
+  const list = $('#bt-list'), b = S.bt; if (!list || S.view !== 'battle' || !b) return;
+  const rows = (b.rows.length ? b.rows : [{name:'You', me:true, scores:b.my.scores}]).map(r => ({name: r.me && S.user ? S.user.name : r.name, me: r.me, scores: r.scores, total: sum(r.scores)}));
+  rows.sort((x, y) => y.total - x.total);
+  const fin = rows.filter(r => r.scores.length >= CARDS).length, all = rows.length > 1 && fin === rows.length;
+  list.innerHTML = rows.map((r, i) => `<li class="${r.me ? 'me' : ''}"><span class="n">${i + 1}</span><span class="nm">${esc(r.name)}${r.me ? '<small class="tag">you</small>' : ''}
     <span class="sqs">${Array.from({length:CARDS}, (_, k) => `<i class="${r.scores[k] === undefined ? 'p' : tier(r.scores[k])}"></i>`).join('')}</span></span><span class="s">${r.total}</span></li>`).join('');
-  $('#bt-status').textContent = rows.length === 1 ? 'Waiting for players. Send the code, or add sample players.'
+  $('#bt-status').textContent = b.err && !b.rows.length ? 'Could not load the other players. Check your connection.'
+    : rows.length === 1 ? 'Waiting for friends to join. Send them the code.'
     : all ? (rows[0].me ? 'You win with ' + rows[0].total + ' points.' : rows[0].name + ' wins with ' + rows[0].total + ' points.')
     : `${rows.length} players, ${fin} finished.`;
-  if (all && rows[0].me && !S.bt.cele) { S.bt.cele = true; setTimeout(() => { burst(innerWidth * .3, innerHeight * .4, 70); burst(innerWidth * .7, innerHeight * .4, 70); }, 400); }
+  if (all && rows[0].me && !b.cele) { b.cele = true; setTimeout(() => { burst(innerWidth * .3, innerHeight * .4, 70); burst(innerWidth * .7, innerHeight * .4, 70); }, 400); }
 }
 function battle() {
   const b = S.bt;
@@ -1279,7 +1336,7 @@ function battle() {
       <section class="sheet"><div class="two">
         <div><h3>Start a battle</h3><p class="sub">You get a four-letter code to send to your friends. Everyone plays the same six cards, in their own time.</p><button class="btn" type="button" id="bt-new">Start a battle</button></div>
         <form id="bt-join"><h3>Join a battle</h3><div class="field"><label for="bt-code">Battle code</label><input id="bt-code" class="codein" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD"></div><button class="btn ghost" type="submit">Join</button></form>
-      </div><p class="note">Battles use their own six cards, so they never spoil today’s set. They do not count toward your streak.</p></section></div>`;
+      </div><p class="note">Battles use their own cards, so they never spoil today’s six. They do not count toward your streak.</p></section></div>`;
     $('#bt-new').onclick = createBattle;
     $('#bt-join').addEventListener('submit', e => { e.preventDefault(); joinBattle($('#bt-code').value); });
     return;
@@ -1288,34 +1345,17 @@ function battle() {
   stage.innerHTML = `<div class="page narrow">${phead('Battle')}
     <section class="sheet">
       <div class="set-head"><div><p class="whose">Battle code</p><div class="code">${esc(b.code)}</div></div><button class="btn small ghost" type="button" id="bt-invite">Copy invite</button></div>
-      <p class="rank" id="bt-status"></p>
+      <p class="rank" id="bt-status">Loading players…</p>
       <ol class="board" id="bt-list"></ol>
       <div class="actions"><button class="btn wide" type="button" id="bt-play">${n === 0 ? 'Play your six' : n < CARDS ? 'Continue, card ' + (n + 1) + ' of ' + CARDS : 'See your cards'}</button>
-        ${b.bots.length ? '' : '<button class="btn ghost" type="button" id="bt-bots">Add sample players</button>'}<button class="btn ghost ${b.bots.length ? 'wide' : ''}" type="button" id="bt-leave">Leave battle</button></div>
-      <p class="note">${b.local ? 'This battle lives on this device and runs against sample players, who reveal a card each time you finish one. Battles against real friends arrive with the live version.' : 'Friends join with the code. In this preview they need access to this page and a Claude account. Sample players reveal a card each time you finish one.'}</p>
+        <button class="btn ghost wide" type="button" id="bt-leave">Leave battle</button></div>
+      <p class="note">Friends join with the code on Split’em. The standings update by themselves.</p>
     </section></div>`;
-  drawStandings();
-  $('#bt-invite').onclick = e => copyText('Battle me on Split’em. Code: ' + b.code, e.currentTarget);
-  $('#bt-play').onclick = () => { S.game = {no:0, battle:b.code, daily:false, qs:b.refs.map(([s, q]) => SETS[s][q]), run:b.my};
+  drawStandings(); refreshBattle(); every(refreshBattle, 8000);
+  $('#bt-invite').onclick = e => copyText(`Battle me on Split’em: splitem-blush.vercel.app — code ${b.code}`, e.currentTarget);
+  $('#bt-play').onclick = () => { S.game = {no:0, battle:b.code, daily:false, mode:'battle', ref:b.code, qs:b.qkeys.map(k => KEYQ[k]), run:b.my};
     S.cur = b.my.scores.length; S.phase = S.cur >= CARDS ? 'done' : 'answer'; S.tmp = null; S.onb = S.profile ? null : {step:0, tmp:{}, then:'play'}; go('play'); };
-  const bots = $('#bt-bots'); if (bots) bots.onclick = () => { b.bots = makeBots(b.code); save(); if (!b.local && DB) DB.doc('battles/' + b.code).update({bots: b.bots}).catch(() => {}); render(); };
-  $('#bt-leave').onclick = () => { S.bt = null; save(); watchBattle(); if (S.game && S.game.battle) S.game = null; render(); };
-}
-
-/* ---------- question bank (owner only) ---------- */
-function bank() {
-  const kinds = {split:'Split', price:'Price', group:'Group'};
-  const line = q => { const t = truthOf(q);
-    return `<li><div>${q.text}</div><span>${kinds[q.t]} · ${q.t === 'price' ? 'median ' + signed(val(t)) : t + '% ' + q.a + (q.t === 'group' ? ', ' + GNAME[q.g[0]] : '')}</span></li>`; };
-  const block = (title, tag, set, open) => `<details class="bankday"${open ? ' open' : ''}><summary><span>${title}</span><small>${tag}</small></summary><ol class="qlist">${set.map(line).join('')}</ol></details>`;
-  let days = '';
-  for (let no = 1; no <= DAILY; no++) days += block('No. ' + no + ' · ' + fmtDate(dateOf(no)), no === DAYNO ? 'Today' : no < DAYNO ? 'Archive' : 'Upcoming', SETS[setOf(no)], no === DAYNO);
-  const pool = SETS.slice(DAILY).map((set, i) => block('Battle set ' + (i + 1), CARDS + ' cards', set, false)).join('');
-  stage.innerHTML = `<div class="page narrow">${phead('Question bank', `${SETS.length * CARDS} questions: ${DAILY * CARDS} in ${DAILY} daily sets and ${(SETS.length - DAILY) * CARDS} in the battle pool. The results shown are sample data.`)}
-    <section class="sheet" style="gap:0"><h3 style="margin-bottom:12px">Daily sets</h3>${days}
-      <p class="note" style="margin-top:12px">The daily sets run from ${fmtDate(dateOf(1))} to ${fmtDate(dateOf(DAILY))}, then start again from the first.</p></section>
-    <section class="sheet" style="gap:0"><h3 style="margin-bottom:12px">Battle pool</h3>${pool}
-      <p class="note" style="margin-top:12px">Each battle draws two cards of every kind from this pool.</p></section></div>`;
+  $('#bt-leave').onclick = () => { S.bt = null; save(); if (S.game && S.game.battle) S.game = null; render(); };
 }
 
 /* ---------- day change ---------- */
